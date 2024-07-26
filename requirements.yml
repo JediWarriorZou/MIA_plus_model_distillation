@@ -1,0 +1,21 @@
+name: MIA_EX
+channels:
+  - pytorch
+  - default
+dependencies:
+  - python = 3.10.0
+  - pip
+  - cudatoolkit
+  - pytorch
+  - torchvision
+  - numpy
+  - pip:
+    - opencv-python
+    - scikit-learn
+    - tqdm
+    - pandas
+    - matplotlib
+    - spicy
+    - pillow
+    - scikit-image
+
