@@ -3,27 +3,31 @@ import torch.nn as nn
 import numpy as np
 import logging
 import torch
+import torch.nn.functional as F
 import torch.utils.data as data
 import os
 from datasets import MYCIFAR10
 from models import ResNet18, ResNet50,AlexNetCIFAR
 from utils import get_parameter_groups,boolean_string,set_logger
 
-
 #setting of hyperparas
 def parse_args():
     parser = argparse.ArgumentParser(description = 'Training target models using PyTorch')
     parser.add_argument('--augmentations', default = True, type=boolean_string, help='Include data augmentations')
     #network
-    parser.add_argument('--model', default = 'alexnet', type=str, help='Number of classes')
+    parser.add_argument('--teacher', default = 'resnet18', type=str, help='Teacher model')
+    parser.add_argument('--teacher_path', default = 'results/checkpoints/resnet18/best_epoch_186_accuracy_85.28.pth', type=str, help='Path of teacher model')
+    parser.add_argument('--student', default = 'alexnet', type=str, help='Student model')
     parser.add_argument('--num_classes', default = 10, type=int, help='Number of classes')
     parser.add_argument('--activation', default ='relu', type=str, help='Activation function')
+    parser.add_argument('--temperature', default = 1, type=int, help='Temperature')
+    parser.add_argument('--alpha', default = 0.0, type=float, help='loss weight')
 
     # optimization:
     parser.add_argument('--resume', default=None, type=str, help='Path to checkpoint to be resumed')
     parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
     parser.add_argument('--momentum', default=0.9, type=float, help='weight momentum of SGD optimizer')
-    parser.add_argument('--epochs', default='300', type=int, help='number of epochs')
+    parser.add_argument('--epochs', default='400', type=int, help='number of epochs')
     parser.add_argument('--wd', default=0.0001, type=float, help='weight decay')  # was 5e-4 for batch_size=128
     parser.add_argument('--num_workers', default = 2, type=int, help='Data loading threads')
     parser.add_argument('--metric', default='accuracy', type=str, help='metric to optimize. accuracy or sparsity')
@@ -35,23 +39,33 @@ def parse_args():
     parser.add_argument('--patience', default=3, type=int, help='LR schedule patience for early stopping')
     parser.add_argument('--cooldown', default=0, type=int, help='LR cooldown')
 
-    parser.add_argument('--checkpoint_dir', default='./results/checkpoints/alexnet', type=str, help='Path of saved model')
+    parser.add_argument('--checkpoint_dir', default='./results/distillation/alexnet_alpha_0.0', type=str, help='Path of saved model')
 
     args = parser.parse_args()
     return args
 
-def train(model, device, train_loader, optimizer, epoch, logger):
-    model.train() 
+def train(teacher,student, device, train_loader, optimizer, epoch, logger,**kargs):
+    teacher.eval()
+    student.train()
     train_loss = 0
     predicted = []
     labels = []
-    criterion = nn.CrossEntropyLoss()
-    for batch_idx, (inputs, targets) in enumerate(train_loader):  # train a single step
+    T = kargs['temp']
+    alpha = kargs['alpha']
 
+    hard_loss_f = nn.CrossEntropyLoss()
+    soft_loss_f = nn.KLDivLoss(reduction = 'batchmean')
+
+    for batch_idx, (inputs, targets) in enumerate(train_loader):  # train a single step
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs['logits'], targets)
+        with torch.no_grad():
+            teacher_outputs = teacher(inputs)
+            teacher_preds = teacher_outputs['logits']
+        outputs = student(inputs)
+        loss_s = hard_loss_f(outputs['logits'],targets)
+        loss_q = soft_loss_f(F.log_softmax(outputs['logits'] / T,dim = 1),F.softmax(teacher_preds / T,dim = 1))
+        loss = alpha * loss_s + (1 - alpha) * loss_q * T * T 
         loss.backward()
         optimizer.step()
         train_loss += loss
@@ -70,22 +84,32 @@ def train(model, device, train_loader, optimizer, epoch, logger):
     train_acc = 100.0 * np.mean(predicted == labels)
     logger.info('Epoch #{} (TRAIN): loss={:.4f}\tacc={:.2f}'.format(epoch, train_loss, train_acc))
 
-
-def validate(model, device, val_loader, epoch, logger, **kargs):
+def validate(teacher, student, device, val_loader, epoch, logger, **kargs):
     global best_metric
     global best_epoch 
+    teacher.eval()
+    student.eval()
 
-    model.eval()
     val_loss = 0
     predicted = []
     labels = []
-    criterion = nn.CrossEntropyLoss()
+    T = kargs['temp']
+    alpha = kargs['alpha']
+
+    hard_loss_f = nn.CrossEntropyLoss()
+    soft_loss_f = nn.KLDivLoss(reduction = 'batchmean')
 
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(val_loader):
             inputs, targets = inputs.to(device), targets.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs['logits'], targets)
+
+            with torch.no_grad():
+                teacher_outputs = teacher(inputs)
+                teacher_preds = teacher_outputs['logits']
+            outputs = student(inputs)
+            loss_s = hard_loss_f(outputs['logits'],targets)
+            loss_q = soft_loss_f(F.log_softmax(outputs['logits'] / T,dim = 1),F.softmax(teacher_preds / T,dim = 1))
+            loss = alpha * loss_s + (1 - alpha) * loss_q * T * T 
             val_loss += loss
             _,preds = outputs['logits'].max(1)
 
@@ -111,16 +135,16 @@ def validate(model, device, val_loader, epoch, logger, **kargs):
 
         #save model
         if epoch % 50 == 0:
-            torch.save(model.state_dict(), os.path.join(kargs['checkpoint_dir'], 'ckpt_epoch_{}_{}_{:.2f}.pth'.format(epoch,kargs['metric'],metric)))
+            torch.save(student.state_dict(), os.path.join(kargs['checkpoint_dir'], 'ckpt_epoch_{}_{}_{:.2f}.pth'.format(epoch,kargs['metric'],metric)))
 
         if (epoch == 1):
             best_metric = metric
             best_epoch = epoch
-            torch.save(model.state_dict(), os.path.join(kargs['checkpoint_dir'], 'best_epoch_{}_{}_{:.2f}.pth'.format(epoch,kargs['metric'],metric)))
+            torch.save(student.state_dict(), os.path.join(kargs['checkpoint_dir'], 'best_epoch_{}_{}_{:.2f}.pth'.format(epoch,kargs['metric'],metric)))
         else:
             if (kargs['metric'] == 'accuracy' and metric > best_metric) or (kargs['metric'] == 'loss' and metric < best_metric) :
                 os.remove(os.path.join(kargs['checkpoint_dir'], 'best_epoch_{}_{}_{:.2f}.pth'.format(best_epoch, kargs['metric'],best_metric)))
-                torch.save(model.state_dict(), os.path.join(kargs['checkpoint_dir'], 'best_epoch_{}_{}_{:.2f}.pth'.format(epoch,kargs['metric'],metric)))
+                torch.save(student.state_dict(), os.path.join(kargs['checkpoint_dir'], 'best_epoch_{}_{}_{:.2f}.pth'.format(epoch,kargs['metric'],metric)))
                 best_metric = metric
                 best_epoch = epoch
 
@@ -161,14 +185,13 @@ if __name__ == "__main__":
     strides = [1, 2, 2, 2]
     conv1 = {'kernel_size': 3, 'stride': 1, 'padding': 1}
 
-    if args.model =='resnet18':
-        model = ResNet18(num_classes = args.num_classes, activation = args.activation,conv1 = conv1, strides = strides).to(device)
-    if args.model =='resnet50':
-        model = ResNet50(num_classes = args.num_classes, activation = args.activation,conv1 = conv1, strides = strides).to(device)   
-    if args.model =='alexnet':   
-        model = AlexNetCIFAR(num_classes = args.num_classes, activation = args.activation).to(device)  
-        
-    decay, no_decay = get_parameter_groups(model)
+    teacher = ResNet18(num_classes = args.num_classes, activation = args.activation,conv1 = conv1, strides = strides).to(device)
+    student = AlexNetCIFAR(num_classes = args.num_classes, activation = args.activation).to(device)  
+
+    teacher_state = torch.load(args.teacher_path, map_location=torch.device(device))
+    teacher.load_state_dict(teacher_state)
+
+    decay, no_decay = get_parameter_groups(student)
 
     optimizer = torch.optim.SGD([{'params': decay.values(), 'weight_decay': args.wd}, {'params': no_decay.values(), 'weight_decay': 0.0}],
                       lr=args.lr, momentum=args.momentum, nesterov=args.momentum > 0)
@@ -189,12 +212,19 @@ if __name__ == "__main__":
         )
     else:
         raise AssertionError('illegal LR scheduler {}'.format(args.lr_scheduler))
-
+    logger.info("alpha:{}".format(args.alpha))
+    
     for epoch in range(1, args.epochs + 1):
-        train(model,device,train_loader,optimizer,epoch,logger)
-        validate(model,device, val_loader, epoch,logger, metric = args.metric, lr_scheduler = lr_scheduler,
-                  early_stopping = True, checkpoint_dir = args.checkpoint_dir)
-        
+        train(teacher, student, device, train_loader, optimizer, epoch, logger, temp = args.temperature, alpha = args.alpha)
+        validate(teacher, student, device, val_loader, epoch,logger,temp = args.temperature, alpha = args.alpha,
+                  metric = args.metric, lr_scheduler = lr_scheduler, early_stopping = True, checkpoint_dir = args.checkpoint_dir)
+                
+
+
+
+
+
+
 
 
 

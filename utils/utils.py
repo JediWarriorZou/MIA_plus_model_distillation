@@ -1,9 +1,12 @@
 import torch.nn as nn
 import torch
 import numpy as np
+import logging
+import sys
 from typing import Dict, List, Tuple
 from sklearn.metrics import precision_recall_fscore_support
 from torchvision import transforms
+from models import ResNet18, ResNet50,AlexNetCIFAR
 
 def get_parameter_groups(net: nn.Module) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     no_decay = dict()
@@ -58,7 +61,7 @@ def get_normalized_tensor(loader: torch.utils.data.DataLoader, img_shape, batch_
 
     return X
 
-def calc_acc_precision_recall(inferred_non_member, inferred_member):
+def calc_acc_precision_recall(inferred_non_member, inferred_member,logger):
     
     member_acc = np.mean(inferred_member == 1)
     non_member_acc = np.mean(inferred_non_member == 0)
@@ -67,7 +70,7 @@ def calc_acc_precision_recall(inferred_non_member, inferred_member):
         y_true=np.concatenate((np.zeros(len(inferred_non_member)), np.ones(len(inferred_member)))),
         y_pred=np.concatenate((inferred_non_member, inferred_member)),
     )
-    print('member acc: {}, non-member acc: {}, balanced acc: {}, precision/recall(member): {}/{}, precision/recall(non-member): {}/{}'
+    logger.info('member acc: {}, non-member acc: {}, balanced acc: {}, precision/recall(member): {}/{}, precision/recall(non-member): {}/{}'
                 .format(member_acc, non_member_acc, acc, precision[1], recall[1], precision[0], recall[0]))
     
 def normalize(x, rgb_mean, rgb_std):
@@ -97,3 +100,12 @@ def convert_tensor_to_image(x: np.ndarray):
     else:
         X = np.transpose(X, [0, 2, 3, 1])
     return X
+
+def set_logger(log_file):
+    logging.basicConfig(format='%(asctime)s %(name)s %(levelname)s %(message)s',
+                        datefmt='%m/%d/%Y %I:%M:%S %p',
+                        level=logging.INFO,
+                        handlers=[logging.FileHandler(log_file, mode='w'),
+                                  logging.StreamHandler(sys.stdout)]
+                        )
+    

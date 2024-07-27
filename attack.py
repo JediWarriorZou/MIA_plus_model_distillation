@@ -9,7 +9,7 @@ import logging
 
 from utils import boolean_string,get_normalized_tensor,calc_acc_precision_recall,set_logger
 from datasets import MYCIFAR10
-from models import ResNet18
+from models import ResNet18,ResNet50,AlexNetCIFAR
 
 from art.attacks.inference.membership_inference import SelfInfluenceFunctionAttack
 from art.estimators.classification import PyTorchClassifier
@@ -19,21 +19,23 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Membership inference attack script')
 
     parser = argparse.ArgumentParser(description='Membership inference attack script')
-    parser.add_argument('--checkpoint_dir', default='results/checkpoints/resnet18', type=str, help='checkpoint dir')
-    parser.add_argument('--checkpoint_file', default='best_epoch_196_accuracy_86.12.pth', type=str, help='checkpoint path file name')
+    parser.add_argument('--checkpoint_dir', default='results/distillation/alexnet_alpha_0.0', type=str, help='checkpoint dir')
+    parser.add_argument('--checkpoint_file', default='best_epoch_159_accuracy_74.18.pth', type=str, help='checkpoint path file name')
     parser.add_argument('--attack', default='self_influence', type=str, help='MI attack: gap/black_box/boundary_distance/self_influence')
     parser.add_argument('--attacker_knowledge', type=float, default=0.5, help='The portion of samples available to the attacker.')
-    parser.add_argument('--output_dir', default='results', type=str, help='attack directory')
+    parser.add_argument('--output_dir', default='results/attack/alexnet_alpha_0.0', type=str, help='attack directory')
     parser.add_argument('--generate_mi_data', default=True, type=boolean_string, help='To generate MI data')
     parser.add_argument('--fast', default=False, type=boolean_string, help='Fast fit (500 samples) and inference (2500 samples)')
 
     #data and network
-    parser.add_argument('--batch_size', default = 32, type=int, help='batch size')
+    parser.add_argument('--prepare_data', default = False, type=boolean_string, help='Number of classes')
+    parser.add_argument('--model', default = 'alexnet', type=str, help='Number of classes')
+    parser.add_argument('--batch_size', default = 64, type=int, help='batch size')
     parser.add_argument('--num_workers', default = 2, type=int, help='Data loading threads')
     parser.add_argument('--num_classes', default = 10, type=int, help='Number of classes')
     parser.add_argument('--activation', default ='relu', type=str, help='Activation function')
 
-    parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
+    parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
     parser.add_argument('--momentum', default=0.9, type=float, help='weight momentum of SGD optimizer')
     parser.add_argument('--wd', default=0.0001, type=float, help='weight decay') 
 
@@ -117,11 +119,11 @@ if __name__ == "__main__":
     set_logger(log_file)
     logger = logging.getLogger()
 
-    data_preparation(batch_size = args.batch_size, num_workers = args.num_workers, 
-                     device = device,attacker_knowledge = args.attacker_knowledge, img_shape = img_shape)
-    
+    if args.prepare_data:
+        data_preparation(batch_size = args.batch_size, num_workers = args.num_workers, 
+                        device = device,attacker_knowledge = args.attacker_knowledge, img_shape = img_shape)
+        
     logger.info('loading data..')
-    
     X_member_train = np.load(os.path.join(data_dir, 'X_member_train.npy'))
     y_member_train = np.load(os.path.join(data_dir, 'y_member_train.npy'))
     X_non_member_train = np.load(os.path.join(data_dir, 'X_non_member_train.npy'))
@@ -137,7 +139,13 @@ if __name__ == "__main__":
 
     logger.info('==> Building model..')
     
-    model = ResNet18(num_classes = args.num_classes, activation = args.activation,conv1 = conv1, strides = strides).to(device)
+    if args.model =='resnet18':
+        model = ResNet18(num_classes = args.num_classes, activation = args.activation,conv1 = conv1, strides = strides).to(device)
+    if args.model =='resnet50':
+        model = ResNet50(num_classes = args.num_classes, activation = args.activation,conv1 = conv1, strides = strides).to(device)   
+    if args.model =='alexnet':   
+        model = AlexNetCIFAR(num_classes = args.num_classes, activation = args.activation).to(device) 
+        
     model_state = torch.load(best_checkpoint, map_location=torch.device(device))
     model.load_state_dict(model_state)
     model.eval()
@@ -157,20 +165,19 @@ if __name__ == "__main__":
                                          adaptive=args.adaptive, average=args.average, for_ref=False,
                                          rec_dep=args.rec_dep, r=args.r)
     
-    print('Begin fitting.')
     logger.info('Fitting {} attack...'.format(args.attack))
     start = time.time()
     attack.fit(x_member=X_member_train, y_member=y_member_train,
                x_non_member=X_non_member_train, y_non_member=y_non_member_train)
     logger.info('Fitting time: {} sec'.format(time.time() - start))
     
-    print('Begin inference.')
+    logger.info('Begin inference.')
     start = time.time()
     inferred_member = attack.infer(X_member_test, y_member_test, **{'infer_set': 'member_test'})
     inferred_non_member = attack.infer(X_non_member_test, y_non_member_test, **{'infer_set': 'non_member_test'})
     logger.info('Inference time: {} sec'.format(time.time() - start))
-    print('Compute metrics.')
+    logger.info('Compute metrics.')
 
-    calc_acc_precision_recall(inferred_non_member, inferred_member)
+    calc_acc_precision_recall(inferred_non_member, inferred_member,logger)
 
  
